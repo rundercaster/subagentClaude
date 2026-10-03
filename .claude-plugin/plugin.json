@@ -1,0 +1,8 @@
+{
+  "name": "subagent-inspector",
+  "version": "0.1.0",
+  "description": "A pane showing each subagent's prompt, live context, tool calls and output",
+  "author": { "name": "rundercaster" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

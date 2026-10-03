@@ -1,0 +1,12 @@
+{
+  "name": "subagent-inspector",
+  "description": "Inspect Claude Code subagents in a pane",
+  "owner": { "name": "rundercaster" },
+  "plugins": [
+    {
+      "name": "subagent-inspector",
+      "source": "./",
+      "description": "A pane showing each subagent's prompt, live context, tool calls and output"
+    }
+  ]
+}
