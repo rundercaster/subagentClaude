@@ -99,6 +99,55 @@ test('records a subagent run and draws prompt, context, tools and output on ever
   }
 })
 
+const COMMAND = {
+  command: 'subagents',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: false, columns: 120 },
+} as const
+
+test('prints a text view where no surface places the pane', async ($, on) => {
+  mock.clock(on)
+  on('agent.spawn', () => ({ model: 'test-model', agentId: AGENT }))
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'the attached surface places no panes' } }))
+  on('agent.list', () => ({ value: [] }))
+  on('session.messages', () => ({
+    value: [{ role: 'user', text: 'Look for bugs in src/', toolUses: [] }],
+  }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+
+  await $.agent.spawn({
+    tool_use_id: 'spawn-1',
+    prompt: 'Look for bugs in src/',
+    description: 'Find bugs',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'test-model',
+    background: true,
+    fork: false,
+  })
+  await $.turn.complete({
+    answer: 'Found 2 bugs.',
+    durationMs: 1000,
+    isAborted: false,
+    turnId: 'turn-1',
+    agentId: AGENT,
+    reason: 'answer',
+  })
+
+  const list = await $.command.run({ ...COMMAND, args: '' })
+  expect(list.text).toMatch(/^No pane here \(the attached surface places no panes\)\./)
+  expect(list.text).not.toMatch(/pane opened/)
+  expect(list.text).toMatch(/1\. ✓ Find bugs · Explore · done/)
+
+  const detail = await $.command.run({ ...COMMAND, args: '1' })
+  expect(detail.text).toMatch(/── Prompt ──\nLook for bugs in src\//)
+  expect(detail.text).toMatch(/\[user #1\]/)
+  expect(detail.text).toMatch(/── Output ──\nFound 2 bugs\./)
+
+  const missing = await $.command.run({ ...COMMAND, args: '9' })
+  expect(missing.text).toMatch(/^No subagent "9"\./)
+})
+
 test('shows an empty state before any subagent runs', async ($, on) => {
   mock.clock(on)
   on('agent.list', () => ({ value: [] }))

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, Register, SessionMessage, StateDollar } from 'claude-code'
+import type { AgentInfo, EngineInterface, Register, SessionMessage, StateDollar } from 'claude-code'
 
 import type { AgentRun, AgentStatus, AgentToolCall, InspectorTab } from '../types'
 
@@ -121,6 +121,73 @@ function merge(list: AgentRun[], known: AgentInfo[], now: number): AgentRun[] {
   return [...merged, ...extra]
 }
 
+const MAX_TEXT_PROMPT = 3000
+const MAX_TEXT_OUTPUT = 4000
+const MAX_TEXT_MESSAGE = 500
+const TEXT_MESSAGES = 8
+const TEXT_TOOLS = 20
+
+const elapsedOf = (run: AgentRun, now: number) => duration((run.endedAt || now) - run.startedAt)
+
+const headline = (run: AgentRun, now: number) =>
+  `${GLYPH[run.status]} ${run.description || run.name || run.id} · ${run.type || '?'} · ${run.status} · ${elapsedOf(run, now)}` +
+  (run.contextTokens > 0 ? ` · ${tokens(run.contextTokens)} ctx` : '') +
+  ` · ${run.toolCount} tools`
+
+// The text view: what /subagents prints where no surface draws the pane (the web, some IDE builds)
+function listText(newest: AgentRun[], now: number): string {
+  if (newest.length === 0) return 'No subagents yet.'
+  return clean(
+    [...newest.map((run, index) => `${index + 1}. ${headline(run, now)}`), '', 'Details: /subagents <number>'].join('\n'),
+  )
+}
+
+function detailText(run: AgentRun, messages: SessionMessage[], now: number): string {
+  const lines = [headline(run, now)]
+  const meta = [
+    run.model && `model ${run.model}`,
+    run.isBackground ? 'background' : 'foreground',
+    run.isFork && 'fork',
+    run.parentId && `parent ${run.parentId}`,
+    `id ${run.id}`,
+  ].filter(Boolean)
+  lines.push(meta.join(' · '))
+
+  const prompt = run.prompt || messages.find(message => message.role === 'user')?.text || ''
+  lines.push('', '── Prompt ──', prompt === '' ? '(not captured)' : clip(clean(prompt), MAX_TEXT_PROMPT))
+
+  const shown = messages.slice(-TEXT_MESSAGES)
+  lines.push('', `── Context: ≈${tokens(run.contextTokens)} tokens, last ${shown.length} of ${messages.length} messages ──`)
+  shown.forEach((message, index) => {
+    lines.push(`[${message.role} #${messages.length - shown.length + index + 1}]`)
+    if (message.text !== '') lines.push(clip(clean(message.text), MAX_TEXT_MESSAGE))
+    for (const use of message.toolUses) {
+      lines.push(`  → ${use.tool} ${summarize(use.input)}`)
+      if (use.text !== undefined) lines.push(`    ← ${oneLine(use.text, 200)}`)
+    }
+  })
+
+  const tools = run.tools.slice(-TEXT_TOOLS)
+  lines.push('', `── Tools: last ${tools.length} of ${run.toolCount} ──`)
+  for (const call of tools) {
+    lines.push(`${call.isDone ? (call.isError ? '✗' : '✓') : '…'} ${call.tool} ${call.summary}`)
+  }
+
+  const lastAssistant = [...messages].reverse().find(message => message.role === 'assistant' && message.text !== '')?.text ?? ''
+  const output =
+    run.answer !== ''
+      ? clip(clean(run.answer), MAX_TEXT_OUTPUT)
+      : lastAssistant !== ''
+        ? `(still running; latest text)\n${clip(clean(lastAssistant), MAX_TEXT_OUTPUT)}`
+        : '(no output yet)'
+  lines.push('', '── Output ──', output)
+
+  return clean(lines.join('\n'))
+}
+
+const newestRuns = async ($: EngineInterface, now: number) =>
+  [...merge(await read($, runs), await $.agent.list(), now)].reverse()
+
 export const register: Register = on => {
   let hasOpened = false
 
@@ -128,16 +195,29 @@ export const register: Register = on => {
     await $.command.register({
       name: 'subagents',
       description: 'Inspect subagents: prompt, live context, tool calls, output',
+      argumentHint: '[number]',
     })
 
     return next(e)
   })
 
-  on('command.run', { command: 'subagents' }, async $ => {
+  on('command.run', { command: 'subagents' }, async ($, e) => {
     hasOpened = true
-    await $.ui.open({ id: PANE, title: TITLE, focus: true })
+    const now = await $.clock.now()
+    const newest = await newestRuns($, now)
+    const pick = e.args.trim()
 
-    return { text: 'Subagents pane opened.' }
+    if (pick !== '') {
+      const run = newest[Number(pick) - 1] ?? newest.find(one => one.id.startsWith(pick))
+      if (run === undefined) return { text: `No subagent "${pick}".\n\n${listText(newest, now)}` }
+      const found = await $.session.messages({ agentId: run.id })
+      return { text: detailText(run, Array.isArray(found) ? found : [], now) }
+    }
+
+    const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
+    const head = opened.isPlaced ? 'Subagents pane opened.' : `No pane here (${opened.reason}).`
+
+    return { text: `${head}\n\n${listText(newest, now)}` }
   })
 
   on('agent.spawn', async ($, e, next) => {
@@ -234,12 +314,12 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const now = await $.clock.now()
-    const list = merge(await read($, runs), await $.agent.list(), now)
+    const newest = await newestRuns($, now)
     const chosenId = await read($, selected)
     const current = await read($, tab)
     const width = Math.max(20, e.props.bodyColumns - 4)
 
-    if (list.length === 0) {
+    if (newest.length === 0) {
       return (
         <Box flexDirection="column">
           <Text dimColor>No subagents yet.</Text>
@@ -248,9 +328,8 @@ export const register: Register = on => {
       )
     }
 
-    const newest = [...list].reverse()
     const run = newest.find(one => one.id === chosenId) ?? newest[0]!
-    const elapsed = (one: AgentRun) => duration((one.endedAt || now) - one.startedAt)
+    const elapsed = (one: AgentRun) => elapsedOf(one, now)
     const label = (one: AgentRun) =>
       oneLine(
         `${GLYPH[one.status]} ${one.description || one.name || one.id} · ${one.type || '?'} · ${elapsed(one)}` +

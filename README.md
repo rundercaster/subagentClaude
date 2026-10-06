@@ -11,7 +11,12 @@ The top of the pane lists all subagents: status (`●` running, `✓` done, `✗
 
 It opens by itself when the first subagent starts, or with `/subagents`.
 
-Panes draw in the terminal, Claude Code Desktop, the Claude mobile app and VS Code.
+The pane shows in the terminal. Where an app can't show plugin panes (claude.ai/code in the browser, some VS Code builds), `/subagents` prints a text view in the chat instead:
+
+- `/subagents`: list of subagents with status, type, run time, context size and tool count
+- `/subagents <number>`: that agent's prompt, recent conversation, tool calls and output
+
+The text view is a snapshot; run the command again to refresh it.
 
 ## Install
 
